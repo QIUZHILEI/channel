@@ -1,36 +1,57 @@
 use std::{cell::UnsafeCell, mem::MaybeUninit, sync::atomic::{AtomicUsize, AtomicPtr, Ordering, self}, marker::PhantomData, time::Instant, ptr};
 
-use super::{utils::CachePadded,context::*, utils::*,waker::SyncWaker, select::*, errors::*};
+use super::{utils::CachePadded, context::*, utils::*, waker::SyncWaker, select::*, errors::*};
 
+/*
+ * 这三个位表示slot的状态：
+ * 如果msg已经被写入slot，WRITE状态被设置
+ * 如果msg已经从slot被读出来，READ状态被设置
+ * 如果block被销毁，DESTROY状态被设置
+ */
+const WRITE: usize = 1;
+const READ: usize = 2;
+const DESTROY: usize = 4;
 
-const WRITE:usize=1;
-const READ:usize=2;
-const DESTROY:usize=4;
+//
+const LAP: usize = 32;
+// 一个msg能持有的最大Block
+const BLOCK_CAP: usize = LAP - 1;
+// TODO()
+const SHIFT: usize = 1;
+/*
+ * MARK_BIT有两种不同的目的：
+ * 如果被设置在head，说明这个块不是最后一个
+ * 如果被设置在tail，表示channel已经断开
+ */
+const MARK_BIT: usize = 1;
 
-const LAP:usize=32;
-const BLOCK_CAP:usize=LAP-1;
-const SHIFT:usize=1;
-const MARK_BIT:usize=1;
-
-
-struct Slot<T>{
-    msg:UnsafeCell<MaybeUninit<T>>,
-    state:AtomicUsize
+// 一个Block块中的Slot
+struct Slot<T> {
+    // msg
+    msg: UnsafeCell<MaybeUninit<T>>,
+    // slot状态(WRITE/READ/DESTROY)
+    state: AtomicUsize,
 }
 
-impl<T> Slot<T>{
-    fn wait_write(&self){
-
+impl<T> Slot<T> {
+    // 自旋直到msg被写入slot
+    fn wait_write(&self) {
+        let backoff=Backoff::new();
+        while self.state.load(Ordering::Acquire)&WRITE==0 {
+            backoff.spin_heavy();
+        }
     }
 }
 
-struct Block<T>{
-    next:AtomicPtr<Block<T>>,
-    slots:[Slot<T>;BLOCK_CAP],
+// block是list的一个节点
+// 每个block可以容纳BLOCK_CAP的信息量
+struct Block<T> {
+    next: AtomicPtr<Block<T>>,
+    slots: [Slot<T>; BLOCK_CAP],
 }
 
+
 impl<T> Block<T> {
-    /// Creates an empty block.
     fn new() -> Block<T> {
         // SAFETY: This is safe because:
         //  [1] `Block::next` (AtomicPtr) may be safely zero initialized.
@@ -75,30 +96,31 @@ impl<T> Block<T> {
 }
 
 #[derive(Debug)]
-struct Position<T>{
-    index:AtomicUsize,
-    block:AtomicPtr<Block<T>>
+struct Position<T> {
+    index: AtomicUsize,
+    block: AtomicPtr<Block<T>>,
 }
 
 #[derive(Debug)]
-pub(crate) struct ListToken{
-    block:*const u8,
-    offset:usize
+pub(crate) struct ListToken {
+    block: *const u8,
+    offset: usize,
 }
 
-impl Default for ListToken{
+impl Default for ListToken {
     #[inline]
     fn default() -> Self {
         ListToken { block: ptr::null(), offset: 0 }
     }
 }
 
-pub(crate) struct Channel<T>{
-    head:CachePadded<Position<T>>,
-    tail:CachePadded<Position<T>>,
-    receivers:SyncWaker,
-    _marker:PhantomData<T>
+pub(crate) struct Channel<T> {
+    head: CachePadded<Position<T>>,
+    tail: CachePadded<Position<T>>,
+    receivers: SyncWaker,
+    _marker: PhantomData<T>,
 }
+
 impl<T> Channel<T> {
     /// Creates a new unbounded channel.
     pub(crate) fn new() -> Self {

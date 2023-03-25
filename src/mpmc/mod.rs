@@ -1,12 +1,24 @@
-mod array;
-mod context;
-mod counter;
-mod error;
-mod list;
-mod select;
-mod utils;
-mod waker;
+// zero array list 分别是三种类型的channel
 mod zero;
+mod array;
+mod list;
+// context
+mod context;
+// utils
+mod utils;
+// waker 通道中被阻塞线程的唤醒机制
+mod waker;
+// select
+mod select;
+// counter
+mod counter;
+// errors
+mod errors;
+
+use std::fmt;
+use std::panic::{RefUnwindSafe, UnwindSafe};
+use std::time::{Duration, Instant};
+use crate::mpmc::errors::*;
 
 // 创建无限容量的channel，即list::Channel<T>
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
@@ -20,9 +32,11 @@ pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     (s, r)
 }
 
-// 创建有限容量的channel
-// 当cap=0时，创建的是zero::Channel<T>，cap为0意味channel不持有msg，需要有一对线程同时协作，一个发送信息，一个接收信息
-// 当cao>0时，创建的时array::Channel<T>
+/*
+ * 创建有限容量并且是发送和接收都是阻塞操作的同步channel
+ * 当cap=0时，创建的是zero::Channel<T>，cap为0意味channel不持有msg，需要有一对线程同时协作，一个发送信息，一个接收信息
+ * 当cao>0时，创建的时array::Channel<T>
+ */
 pub fn sync_channel<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     if cap == 0 {
         let (s, r) = counter::new(zero::Channel::new());
@@ -44,6 +58,12 @@ pub fn sync_channel<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
         (s, r)
     }
 }
+
+/*
+ * 这里的Sender/Receiver是对counter下的Sender/Receiver封装
+ * SenderFlavor/ReceiverFlavor是辅助enum，对三种不同类型的
+ * channel的封装
+ */
 
 pub struct Sender<T> {
     flavor: SenderFlaver<T>,
