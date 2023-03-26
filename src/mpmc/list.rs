@@ -44,7 +44,7 @@ impl<T> Slot<T> {
 }
 
 // block是list的一个节点
-// 每个block可以容纳BLOCK_CAP的信息量
+// 每个block可以容纳BLOCK_CAP的信息量，这也是为了一个缓存块对应一个block，可以对齐缓存块提高性能
 struct Block<T> {
     next: AtomicPtr<Block<T>>,
     slots: [Slot<T>; BLOCK_CAP],
@@ -62,7 +62,7 @@ impl<T> Block<T> {
         unsafe { MaybeUninit::zeroed().assume_init() }
     }
 
-    /// Waits until the next pointer is set.
+    /// 等待next指针域被设置
     fn wait_next(&self) -> *mut Block<T> {
         let backoff = Backoff::new();
         loop {
@@ -74,36 +74,41 @@ impl<T> Block<T> {
         }
     }
 
-    /// Sets the `DESTROY` bit in slots starting from `start` and destroys the block.
+    //将Slot中的state位设置为DESTROY，最终销毁这个Block
     unsafe fn destroy(this: *mut Block<T>, start: usize) {
-        // It is not necessary to set the `DESTROY` bit in the last slot because that slot has
-        // begun destruction of the block.
+        // i 从start到(BLOCK_CAP-1)，不包括BLOCK-1位置的Slot，因为该slot已经开始销毁该块
         for i in start..BLOCK_CAP - 1 {
             let slot = (*this).slots.get_unchecked(i);
 
-            // Mark the `DESTROY` bit if a thread is still using the slot.
+            // 如果还有线程使用这个slot，就标记为DESTROY
             if slot.state.load(Ordering::Acquire) & READ == 0
                 && slot.state.fetch_or(DESTROY, Ordering::AcqRel) & READ == 0
             {
-                // If a thread is still using the slot, it will continue destruction of the block.
+                // 如果一个线程正在使用这个slot，它将会继续销毁该块
                 return;
             }
         }
 
-        // No thread is using the block, now it is safe to destroy it.
+        // 没有线程使用这个块就可以安全的销毁
         drop(Box::from_raw(this));
     }
 }
 
+// 在channel中的一个消息实体所在的位置
 #[derive(Debug)]
 struct Position<T> {
+    // 在channel中的索引
     index: AtomicUsize,
+    // block承载msg实体
     block: AtomicPtr<Block<T>>,
 }
 
+// list flavor channel
 #[derive(Debug)]
 pub(crate) struct ListToken {
+    // slot的block
     block: *const u8,
+    // 在block中的偏移量
     offset: usize,
 }
 
