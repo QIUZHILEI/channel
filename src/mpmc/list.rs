@@ -16,7 +16,7 @@ const DESTROY: usize = 4;
 const LAP: usize = 32;
 // 一个msg能持有的最大Block
 const BLOCK_CAP: usize = LAP - 1;
-// TODO()
+// TODO() 用于右移操作，代表为元数据的低位保留多少位
 const SHIFT: usize = 1;
 /*
  * MARK_BIT有两种不同的目的：
@@ -43,8 +43,11 @@ impl<T> Slot<T> {
     }
 }
 
-// block是list的一个节点
-// 每个block可以容纳BLOCK_CAP的信息量，这也是为了一个缓存块对应一个block，可以对齐缓存块提高性能
+/*
+ * block是list的一个节点
+ * 每个block中的信息msg被组合成一个slots:[Slot[T],BLOCK_CAP]数组,这种连续的分配不仅可以
+ * 内存分配的效率，还可以发挥缓存的性能
+ */
 struct Block<T> {
     next: AtomicPtr<Block<T>>,
     slots: [Slot<T>; BLOCK_CAP],
@@ -53,12 +56,11 @@ struct Block<T> {
 
 impl<T> Block<T> {
     fn new() -> Block<T> {
-        // SAFETY: This is safe because:
-        //  [1] `Block::next` (AtomicPtr) may be safely zero initialized.
-        //  [2] `Block::slots` (Array) may be safely zero initialized because of [3, 4].
-        //  [3] `Slot::msg` (UnsafeCell) may be safely zero initialized because it
-        //       holds a MaybeUninit.
-        //  [4] `Slot::state` (AtomicUsize) may be safely zero initialized.
+        // 这里使用MaybeUninit是安全的
+        // Block::next 可以零初始化
+        // Block::slots 数组可以零初始化
+        // Slot::msg 内部是UnsafeCell持有MaybeUninit域，可以零初始化
+        // Slot::state AtomicUsize可以零初始化
         unsafe { MaybeUninit::zeroed().assume_init() }
     }
 
@@ -119,15 +121,18 @@ impl Default for ListToken {
     }
 }
 
+// 无界Channel：每个发送到这个channel的msg都被赋予一个索引(usize)
 pub(crate) struct Channel<T> {
+    // channel 头
     head: CachePadded<Position<T>>,
+    // channel 尾
     tail: CachePadded<Position<T>>,
+    // 当channel为空或者没有被断开时，Receivers会阻塞，这个SyncWaker就记录阻塞
     receivers: SyncWaker,
     _marker: PhantomData<T>,
 }
 
 impl<T> Channel<T> {
-    /// Creates a new unbounded channel.
     pub(crate) fn new() -> Self {
         Channel {
             head: CachePadded::new(Position {
@@ -143,7 +148,7 @@ impl<T> Channel<T> {
         }
     }
 
-    /// Attempts to reserve a slot for sending a message.
+    // 尝试为发送的消息保留一个Slot
     fn start_send(&self, token: &mut Token) -> bool {
         let backoff = Backoff::new();
         let mut tail = self.tail.index.load(Ordering::Acquire);
@@ -151,13 +156,13 @@ impl<T> Channel<T> {
         let mut next_block = None;
 
         loop {
-            // Check if the channel is disconnected.
+            // 因为index是偶数因此只有
             if tail & MARK_BIT != 0 {
                 token.list.block = ptr::null();
                 return true;
             }
 
-            // Calculate the offset of the index into the block.
+            // 计算进入block的index的偏移量
             let offset = (tail >> SHIFT) % LAP;
 
             // If we reached the end of the block, wait until the next one is installed.
@@ -194,7 +199,7 @@ impl<T> Channel<T> {
                     continue;
                 }
             }
-
+            // index都是偶数
             let new_tail = tail + (1 << SHIFT);
 
             // Try advancing the tail forward.
@@ -226,21 +231,21 @@ impl<T> Channel<T> {
         }
     }
 
-    /// Writes a message into the channel.
+    // 将msg写入channel
     pub(crate) unsafe fn write(&self, token: &mut Token, msg: T) -> Result<(), T> {
-        // If there is no slot, the channel is disconnected.
+        // 如果list中没有slot那么代表channel已经disconnected
         if token.list.block.is_null() {
             return Err(msg);
         }
 
-        // Write the message into the slot.
+        // 写入slot
         let block = token.list.block as *mut Block<T>;
         let offset = token.list.offset;
         let slot = (*block).slots.get_unchecked(offset);
         slot.msg.get().write(MaybeUninit::new(msg));
         slot.state.fetch_or(WRITE, Ordering::Release);
 
-        // Wake a sleeping receiver.
+        // 唤醒一个等待的receiver
         self.receivers.notify();
         Ok(())
     }
@@ -355,7 +360,7 @@ impl<T> Channel<T> {
         Ok(msg)
     }
 
-    /// Attempts to send a message into the channel.
+    /// 尝试发送一个msg到channel
     pub(crate) fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         self.send(msg, None).map_err(|err| match err {
             SendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
@@ -363,7 +368,7 @@ impl<T> Channel<T> {
         })
     }
 
-    /// Sends a message into the channel.
+    /// 发送一个msg到channel
     pub(crate) fn send(
         &self,
         msg: T,
@@ -374,7 +379,7 @@ impl<T> Channel<T> {
         unsafe { self.write(token, msg).map_err(SendTimeoutError::Disconnected) }
     }
 
-    /// Attempts to receive a message without blocking.
+    // 尝试接收一个msg(non-blocking)
     pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
         let token = &mut Token::default();
 
@@ -385,7 +390,7 @@ impl<T> Channel<T> {
         }
     }
 
-    /// Receives a message from the channel.
+    // 接收一个msg
     pub(crate) fn recv(&self, deadline: Option<Instant>) -> Result<T, RecvTimeoutError> {
         let token = &mut Token::default();
         loop {
@@ -463,7 +468,9 @@ impl<T> Channel<T> {
         }
     }
 
-    /// Returns the capacity of the channel.
+    /*
+
+     */
     pub(crate) fn capacity(&self) -> Option<usize> {
         None
     }
@@ -552,12 +559,10 @@ impl<T> Channel<T> {
         self.head.index.store(head, Ordering::Release);
     }
 
-    /// Returns `true` if the channel is disconnected.
     pub(crate) fn is_disconnected(&self) -> bool {
         self.tail.index.load(Ordering::SeqCst) & MARK_BIT != 0
     }
 
-    /// Returns `true` if the channel is empty.
     pub(crate) fn is_empty(&self) -> bool {
         let head = self.head.index.load(Ordering::SeqCst);
         let tail = self.tail.index.load(Ordering::SeqCst);

@@ -4,8 +4,7 @@ use super::{
     select::{Operation, Selected},
 };
 
-// 线程的select会造成阻塞，Entry代表一个线程阻塞在一个指定的channel上的操作
-
+// 线程的select可能会造成阻塞，Entry代表一个线程阻塞在一个指定的channel上的操作
 pub(crate) struct Entry {
     // 这个操作
     pub(crate) oper: Operation,
@@ -15,12 +14,11 @@ pub(crate) struct Entry {
     pub(crate) cx: Context,
 }
 
-// 一个阻塞在channel操作上的线程队列
-
+// 这个数据结构被线程用来记录阻塞操作，并在操作准备就绪后被唤醒
 pub(crate) struct Waker {
     // 一系列的select 操作
     selectors: Vec<Entry>,
-    // 一系列的将要准备好的waiting操作
+    // 等待ready的operation list
     observers: Vec<Entry>,
 }
 

@@ -98,7 +98,6 @@ impl<C> Receiver<C> {
     pub(crate) unsafe fn release<F: FnOnce(&C) -> bool>(&self, disconnect: F) {
         if self.counter().receivers.fetch_sub(1, Ordering::AcqRel) == 1 {
             disconnect(&self.counter().chan);
-
             if self.counter().destroy.swap(true, Ordering::AcqRel) {
                 drop(Box::from_raw(self.counter));
             }

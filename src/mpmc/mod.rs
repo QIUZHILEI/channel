@@ -196,13 +196,8 @@ pub struct Receiver<T> {
     flavor: ReceiverFlavor<T>,
 }
 enum ReceiverFlavor<T> {
-    /// Bounded channel based on a preallocated array.
     Array(counter::Receiver<array::Channel<T>>),
-
-    /// Unbounded channel implemented as a linked list.
     List(counter::Receiver<list::Channel<T>>),
-
-    /// Zero-capacity channel.
     Zero(counter::Receiver<zero::Channel<T>>),
 }
 
@@ -253,7 +248,6 @@ impl<T> Receiver<T>{
         }
     }
 
-    /// Returns the number of messages in the channel.
     pub fn len(&self) -> usize {
         match &self.flavor {
             ReceiverFlavor::Array(chan) => chan.len(),
@@ -262,7 +256,6 @@ impl<T> Receiver<T>{
         }
     }
 
-    /// If the channel is bounded, returns its capacity.
     pub fn capacity(&self) -> Option<usize> {
         match &self.flavor {
             ReceiverFlavor::Array(chan) => chan.capacity(),
