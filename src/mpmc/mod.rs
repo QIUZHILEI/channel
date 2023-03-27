@@ -24,7 +24,7 @@ use crate::mpmc::errors::*;
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let (s, r) = counter::new(list::Channel::new());
     let s = Sender {
-        flavor: SenderFlaver::List(s),
+        flavor: SenderFlavor::List(s),
     };
     let r = Receiver {
         flavor: ReceiverFlavor::List(r),
@@ -41,16 +41,16 @@ pub fn sync_channel<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     if cap == 0 {
         let (s, r) = counter::new(zero::Channel::new());
         let s = Sender {
-            flavor: SenderFlaver::Zero(s),
+            flavor: SenderFlavor::Zero(s),
         };
         let r = Receiver {
             flavor: ReceiverFlavor::Zero(r),
         };
         (s, r)
     } else {
-        let (s, r) = counter::new(array::Channel::new());
+        let (s, r) = counter::new(array::Channel::with_capacity(cap));
         let s = Sender {
-            flavor: SenderFlaver::Array(s),
+            flavor: SenderFlavor::Array(s),
         };
         let r = Receiver {
             flavor: ReceiverFlavor::Array(r),
@@ -66,10 +66,10 @@ pub fn sync_channel<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
  */
 
 pub struct Sender<T> {
-    flavor: SenderFlaver<T>,
+    flavor: SenderFlavor<T>,
 }
 
-enum SenderFlaver<T> {
+enum SenderFlavor<T> {
     Array(counter::Sender<array::Channel<T>>),
     List(counter::Sender<list::Channel<T>>),
     Zero(counter::Sender<zero::Channel<T>>),
@@ -88,7 +88,7 @@ impl<T> Sender<T> {
     // 如果向zero channel发送msg，必须同时要有线程在另一边接收
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         match &self.flavor {
-            SenderFlaver::Array(chan) => chan.try_send(msg),
+            SenderFlavor::Array(chan) => chan.try_send(msg),
             SenderFlavor::List(chan) => chan.try_send(msg),
             SenderFlavor::Zero(chan) => chan.try_send(msg),
         }
@@ -115,6 +115,7 @@ impl<T> Sender<T> {
             None => self.send(msg).map_err(SendTimeoutError::from),
         }
     }
+
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
         match &self.flavor {
             SenderFlavor::Array(chan) => chan.send(msg, Some(deadline)),

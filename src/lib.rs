@@ -1,8 +1,7 @@
-use std::mem::MaybeUninit;
-
 pub mod mpmc;
 
 
+#[test]
 fn test(){
-    let mut x = MaybeUninit::<&i32>::uninit();
+    println!("{}",1<<1);
 }

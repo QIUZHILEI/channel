@@ -110,7 +110,7 @@ struct Position<T> {
 pub(crate) struct ListToken {
     // slot的block
     block: *const u8,
-    // 在block中的偏移量
+    // 在block中的偏移量，offset的计算方式导致它的取值范围为[0,32)
     offset: usize,
 }
 
@@ -156,7 +156,7 @@ impl<T> Channel<T> {
         let mut next_block = None;
 
         loop {
-            // 因为index是偶数因此只有
+            // tail的index是奇数时这个条件为真
             if tail & MARK_BIT != 0 {
                 token.list.block = ptr::null();
                 return true;
@@ -165,7 +165,7 @@ impl<T> Channel<T> {
             // 计算进入block的index的偏移量
             let offset = (tail >> SHIFT) % LAP;
 
-            // If we reached the end of the block, wait until the next one is installed.
+            // 如果offset==Block_CAP时，这个block已经满了，要等待下一个Block被创建
             if offset == BLOCK_CAP {
                 backoff.spin_heavy();
                 tail = self.tail.index.load(Ordering::Acquire);
@@ -173,17 +173,14 @@ impl<T> Channel<T> {
                 continue;
             }
 
-            // If we're going to have to install the next block, allocate it in advance in order to
-            // make the wait for other threads as short as possible.
+            // 如果我们要新创建一个Block就提前分配它，以便使其他线程的等待时间尽可能的短
             if offset + 1 == BLOCK_CAP && next_block.is_none() {
                 next_block = Some(Box::new(Block::<T>::new()));
             }
 
-            // If this is the first message to be sent into the channel, we need to allocate the
-            // first block and install it.
+            // 如果是第一个被发送至channel的msg，需要新创建一个block
             if block.is_null() {
                 let new = Box::into_raw(Box::new(Block::<T>::new()));
-
                 if self
                     .tail
                     .block

@@ -115,7 +115,7 @@ impl Context {
             if let Some(end)=deadline{
                 let now=Instant::now();
                 if now<end{
-                    std::thread::park_timeout(end-now);
+                    thread::park_timeout(end-now);
                 }else{
                     return match self.try_select(Selected::Aborted) {
                         Ok(()) => Selected::Aborted,
@@ -123,7 +123,7 @@ impl Context {
                     };
                 }
             }else{
-                std::thread::park();
+                thread::park();
             }
         }
     }

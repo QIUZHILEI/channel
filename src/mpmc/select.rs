@@ -35,7 +35,7 @@ pub enum Selected {
     Aborted,
     // 一个变成ready的操作因为channel断开了连接(r,s) 2
     Disconnected,
-    // 一个操作变成ready因为一个消息额可以被发送或接收 x
+    // 一个操作变成ready因为一个消息可以被发送或接收 x
     Operation(Operation),
 }
 

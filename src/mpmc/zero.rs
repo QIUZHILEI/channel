@@ -4,7 +4,6 @@ use std::{
     marker::PhantomData,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::TrySendError,
         Mutex,
     },
     time::Instant,
@@ -275,9 +274,7 @@ impl<T> Channel<T> {
         })
     }
 
-    /// Disconnects the channel and wakes up all blocked senders and receivers.
-    ///
-    /// Returns `true` if this call disconnected the channel.
+    // 断开channel并唤醒所有阻塞的sender和receiver
     pub(crate) fn disconnect(&self) -> bool {
         let mut inner = self.inner.lock().unwrap();
 
