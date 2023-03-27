@@ -105,10 +105,10 @@ struct Position<T> {
     block: AtomicPtr<Block<T>>,
 }
 
-// list flavor channel
+// list flavor channel，记录msg在哪一个Block中，Block中的slots数组中的偏移量是多少
 #[derive(Debug)]
 pub(crate) struct ListToken {
-    // slot的block
+    // slot的block，这里代表的是Block指针的指针
     block: *const u8,
     // 在block中的偏移量，offset的计算方式导致它的取值范围为[0,32)
     offset: usize,
@@ -125,7 +125,7 @@ impl Default for ListToken {
 pub(crate) struct Channel<T> {
     // channel 头
     head: CachePadded<Position<T>>,
-    // channel 尾
+    // channel 尾，tail的索引为2，4，6，8..偶数
     tail: CachePadded<Position<T>>,
     // 当channel为空或者没有被断开时，Receivers会阻塞，这个SyncWaker就记录阻塞
     receivers: SyncWaker,
@@ -148,7 +148,10 @@ impl<T> Channel<T> {
         }
     }
 
-    // 尝试为发送的消息保留一个Slot
+    /*
+     * 向channel发送msg前，要调整Block中的slot，如果一个Block
+     * 中有可以使用的空间则只需调整tail索引，如果没有可用空间，则需新建block
+     */
     fn start_send(&self, token: &mut Token) -> bool {
         let backoff = Backoff::new();
         let mut tail = self.tail.index.load(Ordering::Acquire);
@@ -165,7 +168,7 @@ impl<T> Channel<T> {
             // 计算进入block的index的偏移量
             let offset = (tail >> SHIFT) % LAP;
 
-            // 如果offset==Block_CAP时，这个block已经满了，要等待下一个Block被创建
+            // 如果offset==Block_CAP(31)时，这个block已经满了，也证明下一个Block正在被创建，要等待下一个Block被创建
             if offset == BLOCK_CAP {
                 backoff.spin_heavy();
                 tail = self.tail.index.load(Ordering::Acquire);
@@ -173,7 +176,7 @@ impl<T> Channel<T> {
                 continue;
             }
 
-            // 如果我们要新创建一个Block就提前分配它，以便使其他线程的等待时间尽可能的短
+            // 如果我们需要(offset=30)新创建一个Block就提前分配它，以便使其他线程的等待时间尽可能的短
             if offset + 1 == BLOCK_CAP && next_block.is_none() {
                 next_block = Some(Box::new(Block::<T>::new()));
             }
@@ -199,7 +202,7 @@ impl<T> Channel<T> {
             // index都是偶数
             let new_tail = tail + (1 << SHIFT);
 
-            // Try advancing the tail forward.
+            // 更新tail的index
             match self.tail.index.compare_exchange_weak(
                 tail,
                 new_tail,
@@ -207,19 +210,19 @@ impl<T> Channel<T> {
                 Ordering::Acquire,
             ) {
                 Ok(_) => unsafe {
-                    // If we've reached the end of the block, install the next one.
+                    // recheck：如果此时offset为30，应该扩容
                     if offset + 1 == BLOCK_CAP {
                         let next_block = Box::into_raw(next_block.unwrap());
                         self.tail.block.store(next_block, Ordering::Release);
                         self.tail.index.fetch_add(1 << SHIFT, Ordering::Release);
                         (*block).next.store(next_block, Ordering::Release);
                     }
-
                     token.list.block = block as *const u8;
                     token.list.offset = offset;
                     return true;
                 },
                 Err(_) => {
+                    // TODO(这里为什么要自旋)
                     backoff.spin_light();
                     tail = self.tail.index.load(Ordering::Acquire);
                     block = self.tail.block.load(Ordering::Acquire);
