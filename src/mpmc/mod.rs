@@ -162,7 +162,7 @@ impl<T> Sender<T> {
     }
 }
 
-// TODO()
+// 引用计数-1
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         unsafe {

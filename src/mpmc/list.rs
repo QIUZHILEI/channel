@@ -16,7 +16,7 @@ const DESTROY: usize = 4;
 const LAP: usize = 32;
 // 一个msg能持有的最大Block
 const BLOCK_CAP: usize = LAP - 1;
-// TODO() 用于右移操作，代表为元数据的低位保留多少位
+// 用于右移操作，代表为元数据的低位保留多少位
 const SHIFT: usize = 1;
 /*
  * MARK_BIT有两种不同的目的：
@@ -86,7 +86,7 @@ impl<T> Block<T> {
             if slot.state.load(Ordering::Acquire) & READ == 0
                 && slot.state.fetch_or(DESTROY, Ordering::AcqRel) & READ == 0
             {
-                // 如果一个线程正在使用这个slot，它将会继续销毁该块
+                // 如果一个线程正在使用这个slot，那个线程将会继续销毁该块，因此我们应该返回
                 return;
             }
         }
@@ -99,7 +99,7 @@ impl<T> Block<T> {
 // 在channel中的一个消息实体所在的位置
 #[derive(Debug)]
 struct Position<T> {
-    // 在channel中的索引
+    // 在channel中的索引(主要记录head和tail的位置)
     index: AtomicUsize,
     // block承载msg实体
     block: AtomicPtr<Block<T>>,
@@ -243,24 +243,42 @@ impl<T> Channel<T> {
         let offset = token.list.offset;
         let slot = (*block).slots.get_unchecked(offset);
         slot.msg.get().write(MaybeUninit::new(msg));
+        // slot中的msg已经被写入
         slot.state.fetch_or(WRITE, Ordering::Release);
-
         // 唤醒一个等待的receiver
         self.receivers.notify();
         Ok(())
     }
+    // 尝试发送一个msg到channel
+    pub(crate) fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
+        self.send(msg, None).map_err(|err| match err {
+            SendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
+            SendTimeoutError::Timeout(_) => unreachable!(),
+        })
+    }
 
-    /// Attempts to reserve a slot for receiving a message.
+    // 发送一个msg到channel
+    pub(crate) fn send(
+        &self,
+        msg: T,
+        _deadline: Option<Instant>,
+    ) -> Result<(), SendTimeoutError<T>> {
+        let token = &mut Token::default();
+        assert!(self.start_send(token));
+        unsafe { self.write(token, msg).map_err(SendTimeoutError::Disconnected) }
+    }
+
+    // 尝试为接收信息保留一个slot. 这里会选择性的更新head block index，如果head和tail不在一个Block中，head会被设置为奇数
     fn start_recv(&self, token: &mut Token) -> bool {
         let backoff = Backoff::new();
         let mut head = self.head.index.load(Ordering::Acquire);
         let mut block = self.head.block.load(Ordering::Acquire);
 
         loop {
-            // Calculate the offset of the index into the block.
+            // 头部偏移也需要计算
             let offset = (head >> SHIFT) % LAP;
 
-            // If we reached the end of the block, wait until the next one is installed.
+            // 如果offset为BLOCK_CAP说明到达这个block的末尾，应该等待其他
             if offset == BLOCK_CAP {
                 backoff.spin_heavy();
                 head = self.head.index.load(Ordering::Acquire);
@@ -274,27 +292,26 @@ impl<T> Channel<T> {
                 atomic::fence(Ordering::SeqCst);
                 let tail = self.tail.index.load(Ordering::Relaxed);
 
-                // If the tail equals the head, that means the channel is empty.
+                // 头尾索引相同代表channel为空没有msg
                 if head >> SHIFT == tail >> SHIFT {
-                    // If the channel is disconnected...
+                    // 如果channel已经断开
                     if tail & MARK_BIT != 0 {
-                        // ...then receive an error.
+                        // 然后将block置空，并返回一个错误
                         token.list.block = ptr::null();
                         return true;
                     } else {
-                        // Otherwise, the receive operation is not ready.
+                        // 否则就是接收操作未就绪
                         return false;
                     }
                 }
 
-                // If head and tail are not in the same block, set `MARK_BIT` in head.
+                // 如果head和tail不在同一个Block中就将head设置为奇数(MARK_BIT)
                 if (head >> SHIFT) / LAP != (tail >> SHIFT) / LAP {
                     new_head |= MARK_BIT;
                 }
             }
 
-            // The block can be null here only if the first message is being sent into the channel.
-            // In that case, just wait until it gets initialized.
+            // 只有第一个msg进入channel时block会为null，这时需要等待write msg into channel
             if block.is_null() {
                 backoff.spin_heavy();
                 head = self.head.index.load(Ordering::Acquire);
@@ -302,7 +319,7 @@ impl<T> Channel<T> {
                 continue;
             }
 
-            // Try moving the head index forward.
+            // 更新head index
             match self.head.index.compare_exchange_weak(
                 head,
                 new_head,
@@ -334,11 +351,10 @@ impl<T> Channel<T> {
             }
         }
     }
-
     /// Reads a message from the channel.
     pub(crate) unsafe fn read(&self, token: &mut Token) -> Result<T, ()> {
         if token.list.block.is_null() {
-            // The channel is disconnected.
+            // 如果channel已经关闭就返回Err
             return Err(());
         }
 
@@ -358,25 +374,6 @@ impl<T> Channel<T> {
         }
 
         Ok(msg)
-    }
-
-    /// 尝试发送一个msg到channel
-    pub(crate) fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.send(msg, None).map_err(|err| match err {
-            SendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
-            SendTimeoutError::Timeout(_) => unreachable!(),
-        })
-    }
-
-    /// 发送一个msg到channel
-    pub(crate) fn send(
-        &self,
-        msg: T,
-        _deadline: Option<Instant>,
-    ) -> Result<(), SendTimeoutError<T>> {
-        let token = &mut Token::default();
-        assert!(self.start_send(token));
-        unsafe { self.write(token, msg).map_err(SendTimeoutError::Disconnected) }
     }
 
     // 尝试接收一个msg(non-blocking)
@@ -468,19 +465,18 @@ impl<T> Channel<T> {
         }
     }
 
-    /*
-
-     */
     pub(crate) fn capacity(&self) -> Option<usize> {
         None
     }
 
-    /// Disconnects senders and wakes up all blocked receivers.
-    ///
-    /// Returns `true` if this call disconnected the channel.
+    /*
+     * 断开senders并唤醒所有的receivers
+     * 如果操作成功就返回true
+     * 首先的操作就是将tail的索引置为奇数
+     * 如果原来tail的索引就是奇数，说明已经disconnected，那么这个调用就会没有效果返回false
+     */
     pub(crate) fn disconnect_senders(&self) -> bool {
         let tail = self.tail.index.fetch_or(MARK_BIT, Ordering::SeqCst);
-
         if tail & MARK_BIT == 0 {
             self.receivers.disconnect();
             true
@@ -489,9 +485,10 @@ impl<T> Channel<T> {
         }
     }
 
-    /// Disconnects receivers.
-    ///
-    /// Returns `true` if this call disconnected the channel.
+    /*
+     * 断开receivers，如果原来tail的索引就是奇数，说明已经disconnected
+     * 此时应该丢弃所有消息并释放内存
+    */
     pub(crate) fn disconnect_receivers(&self) -> bool {
         let tail = self.tail.index.fetch_or(MARK_BIT, Ordering::SeqCst);
 
@@ -505,9 +502,7 @@ impl<T> Channel<T> {
         }
     }
 
-    /// Discards all messages.
-    ///
-    /// This method should only be called when all receivers are dropped.
+    // 丢弃所有的msg，这个方法应该仅在所有的receivers被删除时才调用
     fn discard_all_messages(&self) {
         let backoff = Backoff::new();
         let mut tail = self.tail.index.load(Ordering::Acquire);
@@ -569,7 +564,6 @@ impl<T> Channel<T> {
         head >> SHIFT == tail >> SHIFT
     }
 
-    /// Returns `true` if the channel is full.
     pub(crate) fn is_full(&self) -> bool {
         false
     }
